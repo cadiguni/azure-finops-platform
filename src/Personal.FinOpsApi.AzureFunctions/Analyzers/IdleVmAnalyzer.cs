@@ -1,0 +1,231 @@
+using System.Text.Json;
+using Azure.Identity;
+using Microsoft.Extensions.Logging;
+using Personal.FinOpsApi.AzureFunctions.Models;
+using Personal.FinOpsApi.AzureFunctions.Services;
+
+namespace Personal.FinOpsApi.AzureFunctions.Analyzers;
+
+/// <summary>
+/// Analyzer para detectar VMs ligadas mas ociosas (idle)
+///  V2.0: Agora usa MÉTRICAS REAIS do Azure Monitor
+/// Maior impacto financeiro na plataforma FinOps
+/// </summary>
+public class IdleVmAnalyzer
+{
+    private readonly HttpClient _httpClient;
+    private readonly DefaultAzureCredential _credential;
+    private readonly AzureMetricsService _metricsService;
+    private readonly ResourceCostLookupService _costLookupService;
+    private readonly ILogger<IdleVmAnalyzer> _logger;
+
+    public IdleVmAnalyzer(
+        HttpClient httpClient, 
+        AzureMetricsService metricsService,
+        ResourceCostLookupService costLookupService,
+        ILogger<IdleVmAnalyzer> logger)
+    {
+        _httpClient = httpClient;
+        _credential = new DefaultAzureCredential();
+        _metricsService = metricsService;
+        _costLookupService = costLookupService;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// Analisa VMs ociosas na subscription
+    /// Combina Resource Graph + Azure Monitor Metrics
+    /// </summary>
+    public async Task<StandardAnalyzerResult> AnalyzeAsync(string subscriptionId, int analysisPeriodDays = 7, bool dryRun = true)
+    {
+        var findings = new List<StandardFinding>();
+
+        try
+        {
+            _logger.LogInformation(" Token obtido com sucesso");
+
+            // Pre-carregar custos do Cost Management para esta subscription
+            await _costLookupService.PreloadCostsAsync(subscriptionId);
+
+            // Query KQL para encontrar VMs em execução
+            var kqlQuery = $@"
+                Resources
+                | where type =~ 'microsoft.compute/virtualmachines'
+                | where subscriptionId =~ '{subscriptionId}'
+                | where properties.extended.instanceView.powerState.displayStatus =~ 'VM running'
+                | project
+                    resourceId = id,
+                    name,
+                    resourceGroup,
+                    subscriptionId,
+                    location,
+                    vmSize = properties.hardwareProfile.vmSize,
+                    osType = properties.storageProfile.osDisk.osType,
+                    powerState = properties.extended.instanceView.powerState.displayStatus,
+                    tags
+                ";
+
+            var token = await _credential.GetTokenAsync(
+                new Azure.Core.TokenRequestContext(new[] { "https://management.azure.com/.default" }));
+
+            var resourceGraphPayload = new
+            {
+                query = kqlQuery
+            };
+
+            var jsonPayload = JsonSerializer.Serialize(resourceGraphPayload);
+            var content = new StringContent(jsonPayload, System.Text.Encoding.UTF8, "application/json");
+
+            _httpClient.DefaultRequestHeaders.Clear();
+            _httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {token.Token}");
+
+            var response = await _httpClient.PostAsync(
+                "https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01",
+                content);
+
+            response.EnsureSuccessStatusCode();
+            var jsonResponse = await response.Content.ReadAsStringAsync();
+            var doc = JsonDocument.Parse(jsonResponse);
+
+            var runningVms = doc.RootElement.GetProperty("data").EnumerateArray().ToList();
+
+            _logger.LogInformation(" Encontradas {count} VMs ociosas em execução", runningVms.Count);
+
+            foreach (var vm in runningVms)
+            {
+                var resourceId = vm.GetProperty("resourceId").GetString() ?? "";
+                var name = vm.GetProperty("name").GetString() ?? "";
+                var location = vm.GetProperty("location").GetString() ?? "";
+                var resourceGroup = vm.GetProperty("resourceGroup").GetString() ?? "";
+                var vmSize = vm.GetProperty("vmSize").GetString() ?? "Standard_B1s";
+                var osType = vm.GetProperty("osType").GetString() ?? "Unknown";
+
+                //  Obter métricas REAIS do Azure Monitor
+                var vmMetrics = await _metricsService.GetVmMetricsAsync(resourceId, analysisPeriodDays);
+                
+                var avgCpuUsage = vmMetrics.AvgCpuPercentage;
+                var totalNetworkGB = vmMetrics.TotalNetworkInGB + vmMetrics.TotalNetworkOutGB;
+                var avgNetworkGBPerDay = totalNetworkGB / analysisPeriodDays;
+                
+                // Memória (se disponível - requer Azure Monitor Agent ou VM Insights)
+                var memoryAvailable = vmMetrics.AvgAvailableMemoryGB >= 0;
+                var availableMemoryGB = vmMetrics.AvgAvailableMemoryGB;
+
+                //  Regra: VM é ociosa se CPU < 5% E trafego de rede < 0.1GB/dia
+                // Se memória disponível estiver muito alta, também indica subutilização
+                var isIdle = avgCpuUsage < 5.0 && avgNetworkGBPerDay < 0.1;
+                
+                if (isIdle)
+                {
+                    // Construir descrição com memória se disponível
+                    var description = memoryAvailable && availableMemoryGB > 0
+                        ? $"VM '{name}' ({vmSize}) ociosa há {analysisPeriodDays} dias: CPU {avgCpuUsage:F1}%, Memória livre: {availableMemoryGB:F1}GB, Rede {avgNetworkGBPerDay:F2}GB/dia"
+                        : $"VM '{name}' ({vmSize}) ociosa há {analysisPeriodDays} dias: CPU {avgCpuUsage:F1}%, Rede {avgNetworkGBPerDay:F2}GB/dia";
+                    
+                    // 💰 CUSTO REAL: Buscar do Cost Management primeiro, fallback para tabela
+                    var costData = await _costLookupService.GetResourceCostDataAsync(subscriptionId, resourceId);
+                    var dailyCost = costData.DailyCost;
+                    var estimatedMonthlyCost = costData.MonthlyCost;
+                    var costSource = costData.CostSource;
+                    
+                    var monthlySavings = estimatedMonthlyCost * 0.85m; // 85% economia ao desligar
+
+                    var finding = new StandardFinding
+                    {
+                        Type = FindingTypes.IDLE_VM,
+                        ResourceId = resourceId,
+                        ResourceName = name,
+                        ResourceType = "Microsoft.Compute/virtualMachines",
+                        ResourceGroup = resourceGroup,     //  CORRIGIDO: Campo obrigatório
+                        Location = location,               //  CORRIGIDO: Campo obrigatório
+                        SubscriptionId = subscriptionId,
+                        DailyCost = dailyCost,
+                        EstimatedMonthlyCost = estimatedMonthlyCost,
+                        CostProvenance = costData.Provenance,
+                        ObservedCost = costData.ObservedCost,
+                        EstimatedMonthlySavings = monthlySavings,
+                        Currency = string.IsNullOrWhiteSpace(costData.Currency) ? "BRL" : costData.Currency,
+                        Priority = estimatedMonthlyCost > 900 ? FindingPriorities.HIGH : 
+                                  estimatedMonthlyCost > 300 ? FindingPriorities.MEDIUM : FindingPriorities.LOW,
+                        Confidence = 0.8,
+                        Description = description,
+                        Recommendation = "Investigar uso da VM. Verificar se está ociosa ou se é necessária para processos batch/jobs. Avaliar desligamento em horários de baixo uso.",
+                        Tags = ExtractTags(vm),            //  CORRIGIDO: Campo no lugar certo
+                        Metadata = new Dictionary<string, object>
+                        {
+                            ["vmSize"] = vmSize,
+                            ["osType"] = osType,
+                            ["analysisPeriodDays"] = analysisPeriodDays,
+                            ["avgCpuPercentage"] = Math.Round(avgCpuUsage, 2),
+                            ["avgNetworkGBPerDay"] = Math.Round(avgNetworkGBPerDay, 3),
+                            ["totalNetworkInGB"] = Math.Round(vmMetrics.TotalNetworkInGB, 3),
+                            ["totalNetworkOutGB"] = Math.Round(vmMetrics.TotalNetworkOutGB, 3),
+                            ["memoryMetricAvailable"] = memoryAvailable,
+                            ["availableMemoryGB"] = memoryAvailable ? Math.Round(availableMemoryGB, 2) : -1,
+                            ["metricsSource"] = "AzureMonitor",
+                            ["costSource"] = costSource,
+                            ["costMatchConfidence"] = costData.CostMatchConfidence,
+                            ["costMatchedResourceId"] = costData.CostMatchedResourceId ?? resourceId,
+                            ["costPeriodFrom"] = costData.CostPeriodFrom ?? DateTime.UtcNow.Date.AddDays(-30),
+                            ["costPeriodTo"] = costData.CostPeriodTo ?? DateTime.UtcNow.Date,
+                            ["costNote"] = costData.CostNote ?? string.Empty,
+                            ["realCostFromApi"] = costData.MonthlyCost
+                        }
+                    };
+
+                    findings.Add(finding);
+                }
+            }
+
+            _logger.LogInformation(" Análise VMs concluída: {count} VMs ociosas encontradas", findings.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, " Erro durante análise de VMs");
+        }
+
+        var result = new StandardAnalyzerResult
+        {
+            SchemaVersion = "1.0",
+            AnalysisId = Guid.NewGuid().ToString(),
+            Analyzer = AnalyzerNames.IDLE_VM_ANALYZER,
+            SubscriptionId = subscriptionId,
+            ExecutedAt = DateTime.UtcNow,
+            AnalysisPeriodDays = analysisPeriodDays,
+            DryRun = dryRun,
+            Findings = findings,
+            ExecutionMetadata = new Dictionary<string, object>
+            {
+                { "totalResourcesAnalyzed", findings.Count },
+                { "analyzerVersion", "2.0" },
+                { "cpuThreshold", 5.0 },
+                { "networkThreshold", 1000 }
+            }
+        };
+        
+        var (isValid, errors) = AnalyzerContractValidator.ValidateResult(result);
+        if (!isValid)
+        {
+            _logger.LogWarning(" Validação falhou: {errors}", string.Join(", ", errors));
+        }
+        
+        return result;
+    }
+
+
+
+    private Dictionary<string, string> ExtractTags(JsonElement resource)
+    {
+        var tags = new Dictionary<string, string>();
+        
+        if (resource.TryGetProperty("tags", out var tagsElement) && tagsElement.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var tag in tagsElement.EnumerateObject())
+            {
+                tags[tag.Name] = tag.Value.GetString() ?? "";
+            }
+        }
+        
+        return tags;
+    }
+}

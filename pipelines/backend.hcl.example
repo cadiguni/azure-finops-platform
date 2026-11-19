@@ -1,0 +1,7 @@
+# Copie para backend.hcl e rode, dentro de terraform-function/ ou terraform-frontend/:
+#   terraform init -backend-config=../backend.hcl
+# Use uma key diferente para cada pasta (function/frontend) e para cada ambiente.
+resource_group_name  = "rg-tfstate"
+storage_account_name = "sttfstate<sufixo-unico>"
+container_name       = "tfstate"
+key                  = "finops/dev/function.tfstate" # use .../frontend.tfstate no terraform-frontend

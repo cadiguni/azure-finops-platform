@@ -1,0 +1,39 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.002.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{9ABA0210-5CDD-4825-86DA-C1DC342BD5FB}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Personal.FinOpsApi.AzureFunctions", "src\Personal.FinOpsApi.AzureFunctions\Personal.FinOpsApi.AzureFunctions.csproj", "{68900CF5-FD14-4199-817F-766E0DF989B7}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{965EC8D0-3916-4F70-8778-E46A19EF9F27}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Personal.FinOpsApi.AzureFunctions.UnitTests", "tests\Unit\Personal.FinOpsApi.AzureFunctions.UnitTests.csproj", "{2BFEA501-9B8F-4A45-9F7C-98A5B093A32B}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{68900CF5-FD14-4199-817F-766E0DF989B7}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{68900CF5-FD14-4199-817F-766E0DF989B7}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{68900CF5-FD14-4199-817F-766E0DF989B7}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{68900CF5-FD14-4199-817F-766E0DF989B7}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2BFEA501-9B8F-4A45-9F7C-98A5B093A32B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2BFEA501-9B8F-4A45-9F7C-98A5B093A32B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2BFEA501-9B8F-4A45-9F7C-98A5B093A32B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2BFEA501-9B8F-4A45-9F7C-98A5B093A32B}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {14031717-5807-4D46-874F-BBB15590F111}
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{68900CF5-FD14-4199-817F-766E0DF989B7} = {9ABA0210-5CDD-4825-86DA-C1DC342BD5FB}
+		{2BFEA501-9B8F-4A45-9F7C-98A5B093A32B} = {965EC8D0-3916-4F70-8778-E46A19EF9F27}
+	EndGlobalSection
+EndGlobal
